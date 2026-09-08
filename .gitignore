@@ -1,3 +1,6 @@
+# project specifics
+logs_uv_*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +219,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# project data / outputs
+data/
+runs/
+logs/
+*.mp4
