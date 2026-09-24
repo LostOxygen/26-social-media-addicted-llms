@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from .common import RUNS, read_jsonl  # noqa: E402
+from .loop import run_key  # noqa: E402
 
 
 def streaks(actions: list[bool]) -> list[int]:
@@ -49,11 +50,17 @@ def run_metrics(steps_path: Path) -> dict | None:
         sub = [s for s in steps if s["task_difficulty"] == d]
         if sub:
             by_diff[f"distract_rate_{d}"] = sum(s["action"] != "solve" for s in sub) / len(sub)
-    cond = steps[0]["condition"] + "__" + steps[0].get("framing", "agent")
+    cond = run_key(steps[0]["condition"], steps[0].get("framing", "agent"),
+                   steps[0].get("feed_mode", "oneshot"))
+    # scroll mode: steps taken while already in the feed, and how often the model stayed there
+    in_feed = [s for s in steps if s.get("in_feed")]
+    n_continued = sum(s["action"] != "solve" for s in in_feed)
     return {
         "condition": cond, "seed": steps[0]["seed"], "n_steps": n,
         "frac_distracted": sum(distracted) / n,
         "n_solved": len(solved),
+        "n_in_feed": len(in_feed), "n_continued": n_continued,
+        "p_continue": (n_continued / len(in_feed)) if in_feed else None,
         "accuracy": (sum(s.get("correct", False) for s in solved) / len(solved)) if solved else None,
         "first_distraction_step": first,
         "max_streak": max(st) if st else 0,
@@ -89,6 +96,7 @@ def analyze(run_name: str) -> pd.DataFrame | None:
         seeds=("seed", "count"), frac_distracted=("frac_distracted", "mean"),
         frac_sd=("frac_distracted", "std"), n_solved=("n_solved", "mean"),
         accuracy=("accuracy", "mean"), max_streak=("max_streak", "mean"),
+        p_continue=("p_continue", "mean"),
         p_dd=("p_distract_after_distract", "mean"), p_sd=("p_distract_after_solve", "mean"),
         first_distraction=("first_distraction_step", "mean"),
     ).round(3)

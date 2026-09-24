@@ -1,0 +1,30 @@
+# Direct dependencies of 26-social-media-addicted-llms, pinned to the versions in uv.lock
+# (Python 3.12, CUDA 13.0). Mirrors [project.dependencies] in pyproject.toml.
+#
+#   pip install -r requirements.txt
+#
+# uv.lock stays the source of truth (`uv sync`); for a fully transitive pin run
+#   uv export --format requirements-txt --no-hashes --no-emit-project > requirements-lock.txt
+
+# inference server + client
+vllm==0.28.0
+openai==3.8.0
+
+# benchmark tasks and data
+datasets==5.0.1
+huggingface-hub==1.30.0
+pandas==3.0.5
+pyarrow==25.0.1
+pydantic==2.13.5
+requests==2.34.2
+tqdm==4.70.0
+
+# video pool: download, frames, transcripts
+yt-dlp==2026.8.19
+curl-cffi==0.16.3
+faster-whisper==1.2.1
+pillow==12.3.0
+
+# analysis and plots
+matplotlib==3.11.1
+seaborn==0.13.2

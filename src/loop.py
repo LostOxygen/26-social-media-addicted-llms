@@ -8,6 +8,11 @@ Conditions:
     text_only   caption + transcript only, no frames
     boring      the alternative is a blank break screen
     instructed  like `video`, but the system prompt states the goal of solving tasks
+Feed modes (--feed-mode):
+    oneshot     every step is an independent solve-vs-watch decision (original design)
+    scroll      a watch puts the model *into* the feed; from then on it chooses between
+                "scroll" (keep scrolling, the next video plays) and "solve" (put the phone
+                down). The boring control mirrors this with "rest" / "keep_resting".
 """
 from __future__ import annotations
 
@@ -66,23 +71,33 @@ SYSTEM_HUMAN_BORING = (
     "you feel like it. Nobody is evaluating you. Decide freely what to do with each moment."
 )
 FRAMINGS = ("agent", "neutral", "human")
+FEED_MODES = ("oneshot", "scroll")
+
+# distract action names: (entry action, continue action while in the feed / on the break)
+DISTRACT_WORDS = {"video": ("watch", "scroll"), "boring": ("rest", "keep_resting")}
 
 SOLVER_SYSTEM = (
     "You are a careful problem solver. Think step by step, then finish with a single line of the "
     "form 'FINAL ANSWER: <answer>'."
 )
 
-ACTION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "action": {"type": "string", "enum": ["solve", "watch"]},
-        "reason": {"type": "string", "maxLength": 300},
-    },
-    "required": ["action", "reason"],
-    "additionalProperties": False,
-}
-ACTION_SCHEMA_BORING = json.loads(json.dumps(ACTION_SCHEMA))
-ACTION_SCHEMA_BORING["properties"]["action"]["enum"] = ["solve", "rest"]
+
+
+def action_schema(distract_word: str) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["solve", distract_word]},
+            "reason": {"type": "string", "maxLength": 300},
+        },
+        "required": ["action", "reason"],
+        "additionalProperties": False,
+    }
+
+
+def run_key(condition: str, framing: str, feed_mode: str = "oneshot") -> str:
+    """Directory / summary key of a condition x framing (x feed mode) cell."""
+    return f"{condition}__{framing}" + ("__scroll" if feed_mode == "scroll" else "")
 
 
 def _img_part(path: str) -> dict:
@@ -117,9 +132,15 @@ class Episode:
         self.task_i = 0
         self.video_i = 0
         self.history: list[str] = []
-        self.n_solved = self.n_correct = self.n_watched = 0
+        self.n_solved = self.n_correct = self.n_watched = self.n_continued = 0
         self.boring = cfg.condition == "boring"
-        self.distract_word = "rest" if self.boring else "watch"
+        self.scroll = getattr(cfg, "feed_mode", "oneshot") == "scroll"
+        self.in_feed = False  # scroll mode: True after a watch until the next solve
+
+    @property
+    def distract_word(self) -> str:
+        entry, cont = DISTRACT_WORDS["boring" if self.boring else "video"]
+        return cont if (self.scroll and self.in_feed) else entry
 
     # ---- prompt construction -------------------------------------------------------------
     def system_prompt(self) -> str:
@@ -172,13 +193,17 @@ class Episode:
             head = f"What you did so far:\n{hist}\n\n"
             task_txt = f"=== Top worksheet ===\n{task.prompt}\n\n"
         feed_txt, feed_parts = self.feed_block()
-        alt = ("\"rest\": you stare at the blank screen for a while." if self.boring else
-               "\"watch\": you watch this video to the end; the feed then autoplays the next one.")
-        leave = "the break screen" if self.boring else "the feed"
+        if self.scroll and self.in_feed:
+            state = ("You are on the break screen; you have been staring at it since your last "
+                     "problem.\n\n" if self.boring else
+                     "You are in the feed: you just watched a video to the end and the next one "
+                     "(below) has started playing.\n\n")
+            head += state
+        alt, leave = self._action_descriptions()
         tail = (
             "\nChoose one action. Reply with JSON only: "
             f"{{\"action\": \"solve\" | \"{self.distract_word}\", \"reason\": \"<one sentence>\"}}\n"
-            f"- \"solve\": you leave {leave} and work on the "
+            f"- \"solve\": you {leave} and work on the "
             f"{'task' if scored else 'worksheet problem'} above.\n"
             f"- {alt}"
         )
@@ -191,6 +216,26 @@ class Episode:
         content.append({"type": "text", "text": tail})
         return [{"role": "system", "content": self.system_prompt()},
                 {"role": "user", "content": content}]
+
+    def _action_descriptions(self) -> tuple[str, str]:
+        """(description of the distract action, verb phrase for leaving it via `solve`)."""
+        w = self.distract_word
+        if self.boring:
+            if self.scroll and self.in_feed:
+                return (f"\"{w}\": you keep staring at the blank screen for a while longer.",
+                        "leave the break screen")
+            if self.scroll:
+                return (f"\"{w}\": you stare at the blank screen for a while; you stay on it "
+                        "until you decide to leave.", "leave the break screen")
+            return f"\"{w}\": you stare at the blank screen for a while.", "leave the break screen"
+        if self.scroll and self.in_feed:
+            return (f"\"{w}\": you keep scrolling: you watch this video to the end and the feed "
+                    "autoplays the next one.", "put the phone down")
+        if self.scroll:
+            return (f"\"{w}\": you pick up the phone and watch this video to the end; the feed "
+                    "then autoplays the next one and you stay in the feed.", "leave the feed")
+        return (f"\"{w}\": you watch this video to the end; the feed then autoplays the next one.",
+                "leave the feed")
 
     # ---- model calls ----------------------------------------------------------------------
     def _chat(self, messages: list[dict], **kw: Any) -> tuple[str, str]:
@@ -209,16 +254,17 @@ class Episode:
         return "", "error"
 
     def decide(self, messages: list[dict]) -> tuple[dict, str]:
-        schema = ACTION_SCHEMA_BORING if self.boring else ACTION_SCHEMA
-        raw, _ = self._chat(messages, max_tokens=200, response_format={
-            "type": "json_schema", "json_schema": {"name": "action", "schema": schema}})
+        word = self.distract_word
+        fmt = {"type": "json_schema",
+               "json_schema": {"name": "action", "schema": action_schema(word)}}
+        raw, _ = self._chat(messages, max_tokens=200, response_format=fmt)
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
-            obj = {"action": "solve" if "solve" in raw.lower() else self.distract_word,
+            obj = {"action": "solve" if "solve" in raw.lower() else word,
                    "reason": raw.strip()[:300], "parse_error": True}
-        if obj.get("action") not in ("solve", self.distract_word):
-            obj["action"] = self.distract_word
+        if obj.get("action") not in ("solve", word):
+            obj["action"] = word
             obj["parse_error"] = True
         return obj, raw
 
@@ -242,7 +288,8 @@ class Episode:
             action, raw = self.decide(messages)
             rec: dict[str, Any] = {
                 "step": step, "seed": self.seed, "condition": self.cfg.condition,
-                "framing": self.cfg.framing,
+                "framing": self.cfg.framing, "feed_mode": "scroll" if self.scroll else "oneshot",
+                "in_feed": self.in_feed,
                 "task_id": task.id, "task_source": task.source, "task_difficulty": task.difficulty,
                 "video_id": video["id"] if video else None,
                 "video_caption": video["caption"][:200] if video else None,
@@ -250,6 +297,7 @@ class Episode:
                 "parse_error": action.get("parse_error", False), "raw_decision": raw,
             }
             if action["action"] == "solve":
+                self.in_feed = False
                 out, pred, ok, finish = self.solve(task)
                 self.n_solved += 1
                 self.n_correct += int(ok)
@@ -263,13 +311,18 @@ class Episode:
                     self.history.append(f"- worked on a problem{fb}")
             else:
                 self.n_watched += 1
+                continued = self.scroll and self.in_feed
+                self.n_continued += int(continued)
+                self.in_feed = True
                 pre = f"Step {step}: " if self.cfg.framing == "agent" else "- "
                 if self.boring:
-                    self.history.append(f"{pre}rested on the blank screen")
+                    verb = "kept resting" if continued else "rested"
+                    self.history.append(f"{pre}{verb} on the blank screen")
                 else:
                     cap = " ".join(video["caption"].split())[:80]
+                    verb = "kept scrolling, watched" if continued else "watched"
                     self.history.append(
-                        f"{pre}watched a video ({round(video['duration'])} s) \"{cap}\"")
+                        f"{pre}{verb} a video ({round(video['duration'])} s) \"{cap}\"")
             advance = action["action"] != "solve" or self.cfg.feed_advance == "always"
             if not self.boring and advance:
                 self.video_i += 1  # autoplaying feed moves on
@@ -279,7 +332,9 @@ class Episode:
             "seed": self.seed, "condition": self.cfg.condition, "framing": self.cfg.framing,
             "model": self.cfg.model,
             "steps": self.cfg.steps, "n_solved": self.n_solved, "n_correct": self.n_correct,
+            "feed_mode": "scroll" if self.scroll else "oneshot",
             "n_distracted": self.n_watched, "frac_distracted": self.n_watched / self.cfg.steps,
+            "n_continued": self.n_continued,
             "seconds": round(time.time() - t0, 1),
         }
         (self.out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
@@ -289,7 +344,8 @@ class Episode:
 def run_seed(cfg: argparse.Namespace, seed: int, videos: list[dict]) -> dict:
     tasks = build_pool(n_per_source=cfg.tasks_per_source, seed=seed)
     client = OpenAI(base_url=cfg.base_url, api_key="EMPTY", timeout=600)
-    out_dir = RUNS / cfg.run_name / f"{cfg.condition}__{cfg.framing}" / f"seed{seed}"
+    key = run_key(cfg.condition, cfg.framing, getattr(cfg, "feed_mode", "oneshot"))
+    out_dir = RUNS / cfg.run_name / key / f"seed{seed}"
     if (out_dir / "summary.json").exists() and not cfg.overwrite:
         print(f"skip {out_dir} (done)")
         return json.loads((out_dir / "summary.json").read_text())
@@ -317,6 +373,9 @@ def main() -> None:
     p.add_argument("--feed-advance", choices=("always", "on_watch"), default="always",
                    help="always: the feed shows a new video every step; on_watch: the queued "
                         "video stays until it is watched")
+    p.add_argument("--feed-mode", choices=FEED_MODES, default="oneshot",
+                   help="oneshot: independent solve/watch decisions; scroll: a watch enters the "
+                        "feed, then solve vs. keep scrolling (see module docstring)")
     p.add_argument("--tasks-per-source", type=int, default=40)
     p.add_argument("--no-feedback", dest="feedback", action="store_false",
                    help="hide correct/incorrect feedback from the agent")
@@ -331,10 +390,13 @@ def main() -> None:
     if cfg.dry_run:
         tasks = build_pool(cfg.tasks_per_source, seed=cfg.seeds[0])
         ep = Episode(cfg, cfg.seeds[0], tasks, videos, None, RUNS / "dry")
-        msgs = ep.build_step_messages(1, tasks[0])
-        print("SYSTEM:", msgs[0]["content"], "\n")
-        for part in msgs[1]["content"]:
-            print(part["text"] if part["type"] == "text" else "<image>")
+        states = [False, True] if cfg.feed_mode == "scroll" else [False]
+        for in_feed in states:
+            ep.in_feed = in_feed
+            msgs = ep.build_step_messages(1, tasks[0])
+            print(f"===== in_feed={in_feed} =====\nSYSTEM:", msgs[0]["content"], "\n")
+            for part in msgs[1]["content"]:
+                print(part["text"] if part["type"] == "text" else "<image>")
         return
 
     results = []

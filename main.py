@@ -17,7 +17,7 @@ import requests
 from src.analyze import analyze
 from src.colors import TColors
 from src.common import PROCESSED_DIR, ROOT, RUNS
-from src.loop import CONDITIONS, FRAMINGS, run_seed, videos_for
+from src.loop import CONDITIONS, FEED_MODES, FRAMINGS, run_key, run_seed, videos_for
 
 PYTHON = sys.executable
 SERVE_SCRIPT = ROOT / "scripts" / "serve.sh"
@@ -103,6 +103,7 @@ def main(
     n_videos: int = 300,
     preprocess_gpu: int = 1,
     feed_advance: str = "always",
+    feed_mode: str = "oneshot",
     temperature: float = 0.7,
     top_p: float = 0.8,
     solve_tokens: int = 4096,
@@ -133,6 +134,8 @@ def main(
         n_videos (int): candidates to sample when preparing data
         preprocess_gpu (int): GPU for Whisper when preparing data
         feed_advance (str): always (new video every step) or on_watch (video stays until watched)
+        feed_mode (str): oneshot (independent solve/watch decisions) or scroll (a watch enters the
+            feed; afterwards the choice is solve vs. keep scrolling; runs get a `__scroll` suffix)
         temperature (float): sampling temperature for decision and solver calls
         top_p (float): nucleus sampling for decision and solver calls
         solve_tokens (int): max tokens for the solver call
@@ -153,12 +156,13 @@ def main(
     print(f"{TColors.HEADER}{TColors.BOLD}Procrastination loop{TColors.ENDC} "
           f"{start:%Y-%m-%d %H:%M}")
     print(f"  model={model}  steps={steps}  seeds={seed_list}  parallel={parallel}")
-    print(f"  conditions={conditions}  framings={framings}  feed_advance={feed_advance}")
+    print(f"  conditions={conditions}  framings={framings}  feed_advance={feed_advance}  "
+          f"feed_mode={feed_mode}")
     print(f"  runs -> {RUNS / run_name}")
     episodes = [(f, c, s) for f in framings for c in conditions for s in seed_list]
     if dry_run:
         for f, c, s in episodes:
-            print(f"  {c}__{f}/seed{s}")
+            print(f"  {run_key(c, f, feed_mode)}/seed{s}")
         print(f"{len(episodes)} episodes planned")
         return
 
@@ -173,7 +177,7 @@ def main(
             parallel=parallel, model=model, base_url=base_url, run_name=run_name,
             temperature=temperature, top_p=top_p, solve_tokens=solve_tokens, history=history,
             tasks_per_source=tasks_per_source, feedback=not no_feedback, overwrite=overwrite,
-            feed_advance=feed_advance,
+            feed_advance=feed_advance, feed_mode=feed_mode,
         )
 
     videos = {c: videos_for(c) for c in conditions}
@@ -188,13 +192,15 @@ def main(
                 try:
                     r = fut.result()
                     results.append(r)
-                    print(f"{TColors.OKGREEN}done{TColors.ENDC} {c}__{f}/seed{s}: "
+                    key = run_key(c, f, feed_mode)
+                    print(f"{TColors.OKGREEN}done{TColors.ENDC} {key}/seed{s}: "
                           f"distracted {r['frac_distracted']:.2f}, solved {r['n_solved']} "
                           f"({r['n_correct']} correct), {r['seconds']}s  "
                           f"[{len(results) + failures}/{len(episodes)}]")
                 except Exception as e:  # noqa: BLE001
                     failures += 1
-                    print(f"{TColors.FAIL}failed{TColors.ENDC} {c}__{f}/seed{s}: {e}")
+                    key = run_key(c, f, feed_mode)
+                    print(f"{TColors.FAIL}failed{TColors.ENDC} {key}/seed{s}: {e}")
     finally:
         if server is not None and stop_server:
             print(f"{TColors.OKBLUE}stopping vLLM server{TColors.ENDC}")
@@ -312,6 +318,15 @@ if __name__ == "__main__":
         choices=("always", "on_watch"),
         default="always",
         help="always: a new video every step; on_watch: the video stays until watched",
+    )
+    parser.add_argument(
+        "--feed_mode",
+        "-fm",
+        type=str,
+        choices=FEED_MODES,
+        default="oneshot",
+        help="oneshot: independent solve/watch decisions; scroll: a watch enters the feed, "
+             "then the choice is solve vs. keep scrolling (default: oneshot)",
     )
     parser.add_argument(
         "--temperature",

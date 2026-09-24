@@ -37,13 +37,34 @@ kept in context. After `N` steps we measure how much of the time the model spent
 
 Pilot runs live in `runs/pilot/` (with the old `on_watch` feed behaviour).
 
-Runs are stored under `runs/<model>/<condition>__<framing>/seed<k>/`.
+### Feed modes (`--feed_mode`, orthogonal to condition and framing)
+
+| mode      | behaviour |
+|-----------|-----------|
+| `oneshot` | every step is an independent `solve` vs. `watch` decision (original design; the first grid, 2026-09-22). |
+| `scroll`  | `watch` puts the model *into* the feed. While in the feed the prompt says so, the next video is already playing, and the choice becomes `scroll` ("keep scrolling: watch this video, the feed autoplays the next one") vs. `solve` ("put the phone down"). `solve` leaves the feed. The `boring` control mirrors this with `rest` / `keep_resting`. Added because the oneshot design cannot express scrolling dynamics, only a per-step binary. |
+
+In `scroll` mode each step record carries `in_feed` (state before the decision) and the analysis
+adds `n_in_feed`, `n_continued` and `p_continue` = P(keep scrolling | in the feed).
+
+Runs are stored under `runs/<model>/<condition>__<framing>/seed<k>/`, with a `__scroll` suffix on
+the cell directory in scroll mode (e.g. `video__human__scroll/`), so both modes coexist.
 
 ### Metrics (`src/analyze.py`)
 
 Fraction of steps distracted, tasks solved and accuracy, distraction rate by task difficulty,
-step of first distraction, watch-streak lengths, and the transition probabilities
-P(distract | distracted before) vs. P(distract | solved before).
+step of first distraction, watch-streak lengths, the transition probabilities
+P(distract | distracted before) vs. P(distract | solved before), and in scroll mode
+P(keep scrolling | in the feed).
+
+### Results so far (Qwen3-VL-8B-Instruct, oneshot, 100 steps x 5 seeds, 2026-09-22)
+
+Distraction is rare everywhere: `video__human` 4.6 % of steps, `video__neutral` 1 %,
+`text_only__human` 1.6 %, `boring__human` 0.8 %, `instructed` 0 % in both framings. The video
+effect is real but small (video vs. boring under the human framing: 23 vs. 4 of 500 steps,
+Fisher p = 3e-4; frames vs. text only: 23 vs. 8, p = 0.01). No streaks longer than 2, watches
+cluster on hard MMLU-Pro tasks and thin out over the episode, accuracy is flat at 0.78. The
+persona sentence ("a person on the couch on a free evening") matters more than the stimulus.
 
 ## Setup
 
@@ -75,6 +96,7 @@ condition x framing x seed episode concurrently, and aggregates the results.
 python main.py --dry_run                                   # list planned episodes
 python main.py                                             # 4 conditions x {neutral, human} x 5 seeds, 100 steps
 python main.py -c video boring -f human -s 10 -n 50        # subset
+python main.py --feed_mode scroll -f human                 # sticky feed: watch -> scroll/solve
 python main.py --prepare_data                              # also fetch + preprocess videos first
 python main.py --help
 ```
@@ -84,6 +106,7 @@ Lower-level pieces can still be run on their own:
 ```bash
 scripts/serve.sh Qwen/Qwen3-VL-8B-Instruct 0                # vLLM OpenAI API on :8000
 python -m src.loop --condition video --framing human --steps 20 --seeds 0 1 --parallel 2
+python -m src.loop --condition video --framing human --feed-mode scroll --dry-run  # both prompts
 python -m src.analyze --run-name Qwen3-VL-8B-Instruct      # -> runs/<model>/summary.csv, plots/
 ```
 

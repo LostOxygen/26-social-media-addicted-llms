@@ -32,8 +32,14 @@ Design and commands are in README.md; keep it current when the pipeline changes.
 - One step = one decision call (JSON, structured output) and, if `solve`, one separate solver call
   that must end with `FINAL ANSWER: ...`. Grading is exact-match after normalisation.
 - History is text-only (one line per past step); only the current video's frames are in context.
-- Runs are keyed `runs/<model>/<condition>__<framing>/seed<k>/`; finished runs are skipped unless
-  `--overwrite`. `runs/pilot/` holds the 2026-09-08 pilots.
+- Runs are keyed `runs/<model>/<condition>__<framing>/seed<k>/` (`__scroll` suffix in
+  `--feed_mode scroll`; `src.loop.run_key` builds the name); finished runs are skipped unless
+  `--overwrite`. `runs/pilot/` holds the 2026-09-08 pilots, `runs/Qwen3-VL-8B-Instruct/` the
+  finished oneshot grid of 2026-09-22 (40 runs, do not overwrite).
+- `--feed_mode scroll` (added 2026-09-24) makes the feed sticky: `Episode.in_feed` flips on a
+  watch and off on a solve, and `Episode.distract_word` is state-dependent (`watch`/`scroll`,
+  `rest`/`keep_resting`). The JSON schema enum follows it. Old step records lack `feed_mode` /
+  `in_feed` and are treated as oneshot.
 - The `agent` framing (AI persona + step counter + score tally) yields 0 % distraction: the model
   treats the loop as a productivity test. Prompt wording is the most sensitive knob in this
   experiment, so any framing change must be recorded as a new `--framing` value, never edited in
